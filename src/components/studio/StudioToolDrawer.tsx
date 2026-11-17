@@ -11,6 +11,8 @@ import {
   Unlock,
   Files,
   ArrowRight,
+  ArrowUp,
+  ArrowDown,
   ExternalLink,
   Shield,
   FileText,
@@ -44,7 +46,19 @@ import { EditAnnotateToolOptions } from './tool-options/EditAnnotateToolOptions'
 import { SecurityToolOptions } from './tool-options/SecurityToolOptions';
 import { OptimizeRepairToolOptions } from './tool-options/OptimizeRepairToolOptions';
 import { ExportToolOptions } from './tool-options/ExportToolOptions';
+import { getDefaultOcrLanguages, parseOcrPageRange, type OCRLanguage } from '@/lib/pdf/processors/ocr';
 import { ImportAppendToolOptions } from './tool-options/ImportAppendToolOptions';
+
+/** Legacy single-script values in the Studio selector were labelled "+ English". */
+const STUDIO_OCR_LEGACY_WITH_ENGLISH = new Set(['chi_sim', 'chi_tra', 'jpn', 'kor']);
+
+function resolveStudioOcrLanguages(value: string): OCRLanguage[] {
+  const langs = value.split('+').map(s => s.trim()).filter(Boolean) as OCRLanguage[];
+  if (langs.length === 1 && STUDIO_OCR_LEGACY_WITH_ENGLISH.has(langs[0])) {
+    return [langs[0], 'eng'];
+  }
+  return langs.length > 0 ? langs : ['eng'];
+}
 
 export const getToolDefaultOptions = (id: string, isZh: boolean = false): Record<string, any> => {
   switch (id) {
@@ -197,7 +211,8 @@ export const getToolDefaultOptions = (id: string, isZh: boolean = false): Record
     case 'edit-attachments':
       return { action: 'view-delete', removeAll: false };
     case 'ocr-pdf':
-      return { language: 'chi_sim', outputFormat: 'searchable-pdf', pageScope: 'all', deskew: true, preserveLayout: true };
+      // language is resolved from the UI locale at execution time (getDefaultOcrLanguages)
+      return { outputFormat: 'searchable-pdf', pageScope: 'all', deskew: true, preserveLayout: true };
     default:
       return {};
   }
@@ -324,6 +339,15 @@ export const StudioToolDrawer: React.FC<StudioToolDrawerProps> = ({
 
   // 13. Append / Merge files
   const [appendFiles, setAppendFiles] = useState<File[]>([]);
+  const moveAppendFile = (index: number, direction: -1 | 1) => {
+    setAppendFiles((prev) => {
+      const target = index + direction;
+      if (target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
 
   // 14. N-Up PDF (Full options: Pages per sheet + Add border + Orientation + Page Size)
   const [nUpPages, setNUpPages] = useState<2 | 4 | 9 | 16>(2);
@@ -337,7 +361,7 @@ export const StudioToolDrawer: React.FC<StudioToolDrawerProps> = ({
   const [posterizePageSize, setPosterizePageSize] = useState<'A4' | 'Letter'>('A4');
 
   // 16. Fix Page Size / Page Dimensions (Full options: Preset + Scale Mode + Orientation)
-  const [pageSizePreset, setPageSizePreset] = useState<'a4' | 'letter' | 'a3' | 'a5'>('a4');
+  const [pageSizePreset, setPageSizePreset] = useState<'a4' | 'letter' | 'a3' | 'a5' | 'envelope-10'>('a4');
   const [pageSizeScaleMode, setPageSizeScaleMode] = useState<'fit' | 'fill' | 'stretch'>('fit');
   const [pageSizeOrientation, setPageSizeOrientation] = useState<'auto' | 'portrait' | 'landscape'>('auto');
 
@@ -354,10 +378,6 @@ export const StudioToolDrawer: React.FC<StudioToolDrawerProps> = ({
   const [rasterizeDpi, setRasterizeDpi] = useState<number>(150);
   const [rasterizeGrayscale, setRasterizeGrayscale] = useState<boolean>(false);
 
-  // 20. OCR PDF (Full options: Language selection + Output Format + Enhance contrast)
-  const [ocrLanguage, setOcrLanguage] = useState<'chi_sim' | 'eng' | 'chi_tra' | 'jpn' | 'kor' | 'fra' | 'deu'>(isZh ? 'chi_sim' : 'eng');
-  const [ocrOutputFormat, setOcrOutputFormat] = useState<'searchable-pdf' | 'text' | 'markdown'>('searchable-pdf');
-  const [ocrEnhanceContrast, setOcrEnhanceContrast] = useState<boolean>(true);
 
   // 21. Export options (Images / Docx / Conversions)
   const [exportImageFormat, setExportImageFormat] = useState<'jpg' | 'png' | 'webp'>('jpg');
@@ -495,8 +515,16 @@ export const StudioToolDrawer: React.FC<StudioToolDrawerProps> = ({
         break;
       }
       case 'extract-pages': {
-        const pages = parsePageNumbers(extractPagesInput);
-        options = { pages: pages.length > 0 ? pages : [1] };
+        const usesParity = extractPagesInput.split(',').some((part) => {
+          const token = part.trim().toLowerCase();
+          return token === 'odd' || token === 'even';
+        });
+        if (usesParity) {
+          options = { pageSelection: extractPagesInput, pages: [] };
+        } else {
+          const pages = parsePageNumbers(extractPagesInput);
+          options = { pages: pages.length > 0 ? pages : [1] };
+        }
         break;
       }
       case 'add-blank-page':
@@ -610,14 +638,20 @@ export const StudioToolDrawer: React.FC<StudioToolDrawerProps> = ({
           backgroundColor: 'white',
         };
         break;
-      case 'ocr-pdf':
+      case 'ocr-pdf': {
+        // Read the selections made in ExportToolOptions (dynamicOptions)
+        const ocrSettings = { ...getToolDefaultOptions(normId, isZh), ...dynamicOptions };
+        const languageValue: string = ocrSettings.language || getDefaultOcrLanguages(validLocale).join('+');
+        const ocrFormats = ['searchable-pdf', 'text', 'markdown', 'json'];
         options = {
-          languages: ocrLanguage === 'chi_sim' ? ['chi_sim', 'eng'] : [ocrLanguage],
-          outputFormat: ocrOutputFormat,
-          preserveLayout: true,
-          enhanceContrast: ocrEnhanceContrast,
+          languages: resolveStudioOcrLanguages(languageValue),
+          outputFormat: ocrFormats.includes(ocrSettings.outputFormat) ? ocrSettings.outputFormat : 'searchable-pdf',
+          pages: ocrSettings.pageScope === 'custom' ? parseOcrPageRange(ocrSettings.customPages || '') : [],
+          preserveLayout: ocrSettings.preserveLayout ?? true,
+          enhanceContrast: ocrSettings.enhanceContrast ?? true,
         };
         break;
+      }
       case 'merge-pdf':
       case 'alternate-merge':
       case 'image-to-pdf':
@@ -1279,8 +1313,8 @@ export const StudioToolDrawer: React.FC<StudioToolDrawerProps> = ({
                 {[
                   { label: isZh ? '前 3 页' : '1-3', val: '1-3' },
                   { label: isZh ? '仅第 1 页' : 'Page 1', val: '1' },
-                  { label: isZh ? '奇数页' : 'Odd', val: '1, 3, 5, 7, 9' },
-                  { label: isZh ? '偶数页' : 'Even', val: '2, 4, 6, 8, 10' },
+                  { label: isZh ? '奇数页' : 'Odd', val: 'odd' },
+                  { label: isZh ? '偶数页' : 'Even', val: 'even' },
                 ].map((item) => (
                   <button
                     key={item.label}
@@ -1788,6 +1822,7 @@ export const StudioToolDrawer: React.FC<StudioToolDrawerProps> = ({
                     { key: 'letter', label: 'Letter (8.5×11in)' },
                     { key: 'a3', label: 'A3 (297×420mm)' },
                     { key: 'a5', label: 'A5 (148×210mm)' },
+                    { key: 'envelope-10', label: '#10 Envelope (4.125×9.5in)' },
                   ].map((p) => (
                     <button
                       key={p.key}
@@ -1825,6 +1860,31 @@ export const StudioToolDrawer: React.FC<StudioToolDrawerProps> = ({
                       }`}
                     >
                       {m.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-[hsl(var(--color-foreground))] block mb-1">
+                  {isZh ? '页面方向' : 'Page Orientation'}
+                </label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[
+                    { key: 'auto', label: isZh ? '自动' : 'Auto' },
+                    { key: 'portrait', label: isZh ? '纵向' : 'Portrait' },
+                    { key: 'landscape', label: isZh ? '横向' : 'Landscape' },
+                  ].map((o) => (
+                    <button
+                      key={o.key}
+                      type="button"
+                      onClick={() => setPageSizeOrientation(o.key as any)}
+                      className={`py-1.5 text-xs rounded-lg border font-medium text-center transition-all ${
+                        pageSizeOrientation === o.key
+                          ? 'border-[hsl(var(--color-primary))] bg-[hsl(var(--color-primary)/0.1)] text-[hsl(var(--color-primary))] font-bold'
+                          : 'border-[hsl(var(--color-border))] text-[hsl(var(--color-muted-foreground))] hover:bg-[hsl(var(--color-muted))]'
+                      }`}
+                    >
+                      {o.label}
                     </button>
                   ))}
                 </div>
@@ -2008,7 +2068,23 @@ export const StudioToolDrawer: React.FC<StudioToolDrawerProps> = ({
               <label className="text-xs font-semibold text-[hsl(var(--color-foreground))] block">
                 {isZh ? '选择要并入的文件' : 'Select Files to Append'}
               </label>
-              <label className="border-2 border-dashed border-[hsl(var(--color-border))] hover:border-[hsl(var(--color-primary))] rounded-xl p-4 flex flex-col items-center justify-center cursor-pointer transition-colors bg-[hsl(var(--color-muted)/0.3)]">
+              <label
+                data-testid="studio-append-dropzone"
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (isApplying) return;
+                  const dropped = Array.from(e.dataTransfer.files || []);
+                  if (dropped.length > 0) {
+                    setAppendFiles((prev) => [...prev, ...dropped]);
+                  }
+                }}
+                className="border-2 border-dashed border-[hsl(var(--color-border))] hover:border-[hsl(var(--color-primary))] rounded-xl p-4 flex flex-col items-center justify-center cursor-pointer transition-colors bg-[hsl(var(--color-muted)/0.3)]"
+              >
                 <Upload className="w-5 h-5 text-[hsl(var(--color-muted-foreground))] mb-1" />
                 <span className="text-xs font-medium text-[hsl(var(--color-foreground))]">
                   {isZh ? '点击或拖拽添加外部文件' : 'Click or drop files'}
@@ -2016,14 +2092,60 @@ export const StudioToolDrawer: React.FC<StudioToolDrawerProps> = ({
                 <input
                   type="file"
                   multiple
+                  aria-label={isZh ? '选择要并入的文件' : 'Select Files to Append'}
+                  disabled={isApplying}
                   onChange={(e) => {
                     if (e.target.files) {
-                      setAppendFiles(Array.from(e.target.files));
+                      const selected = Array.from(e.target.files);
+                      setAppendFiles((prev) => [...prev, ...selected]);
+                      e.target.value = '';
                     }
                   }}
                   className="hidden"
                 />
               </label>
+              <p role="status" className="text-xs text-[hsl(var(--color-muted-foreground))]">
+                {isZh ? `已选文件：${appendFiles.length}` : `Selected files: ${appendFiles.length}`}
+              </p>
+              {appendFiles.length > 0 && (
+                <>
+                  <p className="text-[11px] text-[hsl(var(--color-muted-foreground))]">
+                    {isZh ? '以下文件将按顺序追加到当前文档后。' : 'Files will be appended after the current document in this order.'}
+                  </p>
+                  <ol aria-label={isZh ? '已选文件' : 'Selected files'} className="space-y-1.5">
+                    {appendFiles.map((file, index) => (
+                      <li key={index} className="flex items-center gap-1 rounded-lg border border-[hsl(var(--color-border))] p-1.5 text-xs">
+                        <span className="shrink-0 text-[hsl(var(--color-muted-foreground))]">{index + 1}.</span>
+                        <span className="min-w-0 flex-1 truncate" title={file.name}>{file.name}</span>
+                        <Button
+                          type="button" variant="ghost" size="icon" className="h-8 w-8"
+                          aria-label={isZh ? `上移 ${file.name}` : `Move ${file.name} up`}
+                          disabled={isApplying || index === 0}
+                          onClick={() => moveAppendFile(index, -1)}
+                        >
+                          <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
+                        </Button>
+                        <Button
+                          type="button" variant="ghost" size="icon" className="h-8 w-8"
+                          aria-label={isZh ? `下移 ${file.name}` : `Move ${file.name} down`}
+                          disabled={isApplying || index === appendFiles.length - 1}
+                          onClick={() => moveAppendFile(index, 1)}
+                        >
+                          <ArrowDown className="h-3.5 w-3.5" aria-hidden="true" />
+                        </Button>
+                        <Button
+                          type="button" variant="ghost" size="icon" className="h-8 w-8"
+                          aria-label={isZh ? `移除 ${file.name}` : `Remove ${file.name}`}
+                          disabled={isApplying}
+                          onClick={() => setAppendFiles((prev) => prev.filter((_, i) => i !== index))}
+                        >
+                          <X className="h-3.5 w-3.5" aria-hidden="true" />
+                        </Button>
+                      </li>
+                    ))}
+                  </ol>
+                </>
+              )}
               {/* Quick Add from Open Studio Documents */}
               {availableDocuments && availableDocuments.length > 0 && (
                 <div className="space-y-1.5 pt-1 border-t border-[hsl(var(--color-border)/0.6)]">
@@ -2037,6 +2159,7 @@ export const StudioToolDrawer: React.FC<StudioToolDrawerProps> = ({
                         <button
                           key={doc.id}
                           type="button"
+                          disabled={isApplying}
                           onClick={() => {
                             if (isAdded) {
                               setAppendFiles((prev) => prev.filter((f) => f.name !== doc.name));
